@@ -13,6 +13,7 @@
 #include "thash.h"
 #include "utils.h"
 #include "wots.h"
+#include "timing.h"
 
 /*
  * Returns the length of a secret key, in bytes
@@ -93,6 +94,7 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
 int crypto_sign_signature(uint8_t *sig, size_t *siglen,
                           const uint8_t *m, size_t mlen, const uint8_t *sk) {
     spx_ctx ctx;
+    sphincs_timing_ctx timing;
 
     const uint8_t *sk_prf = sk + SPX_N;
     const uint8_t *pk = sk + 2 * SPX_N;
@@ -113,8 +115,14 @@ int crypto_sign_signature(uint8_t *sig, size_t *siglen,
        preparation or computation it needs, based on the public seed. */
     initialize_hash_function(&ctx);
 
+    /* Start total timing */
+    timing_start(&timing.total);
+
     set_type(wots_addr, SPX_ADDR_TYPE_WOTS);
     set_type(tree_addr, SPX_ADDR_TYPE_HASHTREE);
+
+    /* Stage 1: Message Preprocessing */
+    timing_start(&timing.preprocessing);
 
     /* Optionally, signing can be made non-deterministic using optrand.
        This can help counter side-channel attacks that would benefit from
@@ -127,12 +135,22 @@ int crypto_sign_signature(uint8_t *sig, size_t *siglen,
     hash_message(mhash, &tree, &idx_leaf, sig, pk, m, mlen, &ctx);
     sig += SPX_N;
 
+    timing_end(&timing.preprocessing);
+
     set_tree_addr(wots_addr, tree);
     set_keypair_addr(wots_addr, idx_leaf);
+
+    /* Stage 2: FORS Signing */
+    timing_start(&timing.fors_signing);
 
     /* Sign the message hash using FORS. */
     fors_sign(sig, root, mhash, &ctx, wots_addr);
     sig += SPX_FORS_BYTES;
+
+    timing_end(&timing.fors_signing);
+
+    /* Stage 3: Multi-layer Merkle Tree Signing */
+    timing_start(&timing.merkle_signing);
 
     for (i = 0; i < SPX_D; i++) {
         set_layer_addr(tree_addr, i);
@@ -148,6 +166,12 @@ int crypto_sign_signature(uint8_t *sig, size_t *siglen,
         idx_leaf = (tree & ((1 << SPX_TREE_HEIGHT) - 1));
         tree = tree >> SPX_TREE_HEIGHT;
     }
+
+    timing_end(&timing.merkle_signing);
+
+    /* End total timing and print results */
+    timing_end(&timing.total);
+    print_timing_results(&timing);
 
     free_hash_function(&ctx);
 
