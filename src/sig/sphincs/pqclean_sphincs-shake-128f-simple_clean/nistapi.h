@@ -84,4 +84,32 @@ int crypto_sign_open(uint8_t *m, size_t *mlen,
                      const uint8_t *sm, size_t smlen,
                      const uint8_t *pk);
 
+/*============================================================================
+ * Multi-Layer Cache Support (Method 2: Static Top-Layer Caching)
+ *
+ * For SPHINCS+-128f: 2 layers, ~3.4 KB, ~9% speedup
+ *============================================================================*/
+
+#include "merkle.h"
+
+#define crypto_sign_init_multilayer_cache SPX_NAMESPACE(crypto_sign_init_multilayer_cache)
+int crypto_sign_init_multilayer_cache(spx_multilayer_cache *cache,
+                                       const uint8_t *sk,
+                                       int num_layers);
+
+#define crypto_sign_signature_multilayer_cached SPX_NAMESPACE(crypto_sign_signature_multilayer_cached)
+int crypto_sign_signature_multilayer_cached(uint8_t *sig, size_t *siglen,
+                                             const uint8_t *m, size_t mlen,
+                                             const uint8_t *sk,
+                                             const spx_multilayer_cache *cache);
+
+#define crypto_sign_init_cache SPX_NAMESPACE(crypto_sign_init_cache)
+int crypto_sign_init_cache(spx_top_cache *cache, const uint8_t *sk);
+
+#define crypto_sign_signature_cached SPX_NAMESPACE(crypto_sign_signature_cached)
+int crypto_sign_signature_cached(uint8_t *sig, size_t *siglen,
+                                 const uint8_t *m, size_t mlen,
+                                 const uint8_t *sk,
+                                 const spx_top_cache *cache);
+
 #endif

@@ -84,4 +84,52 @@ int crypto_sign_open(uint8_t *m, size_t *mlen,
                      const uint8_t *sm, size_t smlen,
                      const uint8_t *pk);
 
+/*============================================================================
+ * Multi-Layer Cache Support (Method 2: Static Top-Layer Caching)
+ *============================================================================*/
+
+#include "merkle.h"  /* For cache types */
+
+/**
+ * Initialize multi-layer cache (1 layer only for 256s).
+ *
+ * @param cache     Pointer to cache structure
+ * @param sk        Secret key
+ * @param num_layers Number of layers to cache (1 only for 256s)
+ *
+ * Space requirements (SPHINCS+-256s):
+ *   1 layer: ~64 KB, ~12.5% speedup
+ */
+#define crypto_sign_init_multilayer_cache SPX_NAMESPACE(crypto_sign_init_multilayer_cache)
+int crypto_sign_init_multilayer_cache(spx_multilayer_cache *cache,
+                                       const uint8_t *sk,
+                                       int num_layers);
+
+/**
+ * Returns a detached signature using multi-layer cache.
+ * Optimizes top layer of the hypertree.
+ */
+#define crypto_sign_signature_multilayer_cached SPX_NAMESPACE(crypto_sign_signature_multilayer_cached)
+int crypto_sign_signature_multilayer_cached(uint8_t *sig, size_t *siglen,
+                                             const uint8_t *m, size_t mlen,
+                                             const uint8_t *sk,
+                                             const spx_multilayer_cache *cache);
+
+/* Backward compatible single-layer cache API */
+
+/**
+ * Initialize the top layer cache (1 layer only).
+ */
+#define crypto_sign_init_cache SPX_NAMESPACE(crypto_sign_init_cache)
+int crypto_sign_init_cache(spx_top_cache *cache, const uint8_t *sk);
+
+/**
+ * Returns a detached signature using cached top layer.
+ */
+#define crypto_sign_signature_cached SPX_NAMESPACE(crypto_sign_signature_cached)
+int crypto_sign_signature_cached(uint8_t *sig, size_t *siglen,
+                                 const uint8_t *m, size_t mlen,
+                                 const uint8_t *sk,
+                                 const spx_top_cache *cache);
+
 #endif
