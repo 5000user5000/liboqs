@@ -61,10 +61,17 @@ void merkle_gen_root(unsigned char *root, const spx_ctx *ctx) {
 
 /*============================================================================
  * Multi-Layer Cache Implementation for SPHINCS+-128s
+ *
+ * Optimized O(n) algorithm: compute tree once, extract all auth paths
  *============================================================================*/
 
 /*
  * Helper function to compute auth paths for a single tree at a given layer.
+ *
+ * Optimized O(n) algorithm instead of O(n²):
+ * 1. Compute all n leaf nodes (WOTS+ public keys)
+ * 2. Build internal nodes bottom-up
+ * 3. Extract auth paths from stored nodes
  */
 static void compute_tree_auth_paths(spx_layer_tree_cache *tree_cache,
                                      const spx_ctx *ctx,
@@ -72,21 +79,76 @@ static void compute_tree_auth_paths(spx_layer_tree_cache *tree_cache,
                                      uint64_t tree_index) {
     uint32_t tree_addr[8] = {0};
     uint32_t wots_addr[8] = {0};
-    unsigned char sig_buffer[SPX_WOTS_BYTES + SPX_TREE_HEIGHT * SPX_N];
-    unsigned char root[SPX_N];
-    uint32_t i;
+    uint32_t i, h;
+
+    /* Allocate space for all nodes: leaves + internal nodes
+     * For tree height h, we have 2^h leaves and 2^h - 1 internal nodes
+     * Total: 2^(h+1) - 1 nodes, but we store by level for easier access
+     *
+     * nodes[level][idx] where level 0 = leaves, level h = root
+     */
+    unsigned char nodes[SPX_TREE_HEIGHT + 1][SPX_TREE_LEAVES][SPX_N];
+
+    struct leaf_info_x1 info = { 0 };
+    unsigned steps[SPX_WOTS_LEN];
 
     set_layer_addr(tree_addr, layer);
     set_layer_addr(wots_addr, layer);
     set_tree_addr(tree_addr, tree_index);
     set_tree_addr(wots_addr, tree_index);
 
-    /* For each possible leaf index, compute the authentication path */
+    /* Setup for leaf generation (no signing, just public key computation) */
+    info.wots_sig = NULL;
+    info.wots_sign_leaf = ~0U;  /* No signing */
+    info.wots_steps = steps;
+
+    set_type(&tree_addr[0], SPX_ADDR_TYPE_HASHTREE);
+    set_type(&info.pk_addr[0], SPX_ADDR_TYPE_WOTSPK);
+    copy_subtree_addr(&info.leaf_addr[0], wots_addr);
+    copy_subtree_addr(&info.pk_addr[0], wots_addr);
+
+    /* Step 1: Compute all leaf nodes - O(n) WOTS computations */
     for (i = 0; i < SPX_TREE_LEAVES; i++) {
-        merkle_sign(sig_buffer, root, ctx, wots_addr, tree_addr, i);
-        /* Extract the authentication path (after WOTS signature) */
-        memcpy(tree_cache->auth_paths[i], sig_buffer + SPX_WOTS_BYTES,
-               SPX_TREE_HEIGHT * SPX_N);
+        set_keypair_addr(info.leaf_addr, i);
+        set_keypair_addr(info.pk_addr, i);
+        wots_gen_leafx1(nodes[0][i], ctx, i, &info);
+    }
+
+    /* Step 2: Build internal nodes bottom-up - O(n) thash computations */
+    for (h = 0; h < SPX_TREE_HEIGHT; h++) {
+        uint32_t nodes_at_level = SPX_TREE_LEAVES >> h;
+        uint32_t nodes_at_next = nodes_at_level >> 1;
+
+        for (i = 0; i < nodes_at_next; i++) {
+            unsigned char parent_input[2 * SPX_N];
+
+            set_tree_height(tree_addr, h + 1);
+            set_tree_index(tree_addr, i);
+
+            /* Concatenate left and right children */
+            memcpy(parent_input, nodes[h][2*i], SPX_N);
+            memcpy(parent_input + SPX_N, nodes[h][2*i + 1], SPX_N);
+
+            /* Compute parent node */
+            thash(nodes[h + 1][i], parent_input, 2, ctx, tree_addr);
+        }
+    }
+
+    /* Step 3: Extract auth paths for each leaf - O(n * h) memory copies */
+    for (i = 0; i < SPX_TREE_LEAVES; i++) {
+        unsigned char *auth_path = tree_cache->auth_paths[i];
+        uint32_t idx = i;
+
+        for (h = 0; h < SPX_TREE_HEIGHT; h++) {
+            /* Sibling index: flip the lowest bit */
+            uint32_t sibling_idx = idx ^ 1;
+
+            /* Copy sibling to auth path */
+            memcpy(auth_path + h * SPX_N, nodes[h][sibling_idx], SPX_N);
+
+            /* Move to parent level */
+            idx >>= 1;
+        }
     }
 }
 
@@ -188,30 +250,71 @@ void merkle_sign_multilayer_cached(uint8_t *sig, unsigned char *root,
 
 /*
  * Initialize the top layer cache (backward compatible).
+ * Optimized O(n) algorithm.
  */
 void merkle_init_top_cache(spx_top_cache *cache, const spx_ctx *ctx) {
-    uint32_t top_tree_addr[8] = {0};
+    uint32_t tree_addr[8] = {0};
     uint32_t wots_addr[8] = {0};
-    unsigned char sig_buffer[SPX_WOTS_BYTES + SPX_TREE_HEIGHT * SPX_N];
-    unsigned char root[SPX_N];
-    uint32_t i;
+    uint32_t i, h;
 
-    set_layer_addr(top_tree_addr, SPX_D - 1);
+    /* Allocate space for all nodes by level */
+    unsigned char nodes[SPX_TREE_HEIGHT + 1][SPX_TREE_LEAVES][SPX_N];
+
+    struct leaf_info_x1 info = { 0 };
+    unsigned steps[SPX_WOTS_LEN];
+
+    set_layer_addr(tree_addr, SPX_D - 1);
     set_layer_addr(wots_addr, SPX_D - 1);
+    set_tree_addr(tree_addr, 0);
+    set_tree_addr(wots_addr, 0);
 
+    /* Setup for leaf generation */
+    info.wots_sig = NULL;
+    info.wots_sign_leaf = ~0U;
+    info.wots_steps = steps;
+
+    set_type(&tree_addr[0], SPX_ADDR_TYPE_HASHTREE);
+    set_type(&info.pk_addr[0], SPX_ADDR_TYPE_WOTSPK);
+    copy_subtree_addr(&info.leaf_addr[0], wots_addr);
+    copy_subtree_addr(&info.pk_addr[0], wots_addr);
+
+    /* Step 1: Compute all leaf nodes - O(n) */
     for (i = 0; i < SPX_TREE_LEAVES; i++) {
-        set_tree_addr(top_tree_addr, 0);
-        set_tree_addr(wots_addr, 0);
-
-        merkle_sign(sig_buffer, root, ctx, wots_addr, top_tree_addr, i);
-
-        memcpy(cache->auth_paths[i], sig_buffer + SPX_WOTS_BYTES,
-               SPX_TREE_HEIGHT * SPX_N);
+        set_keypair_addr(info.leaf_addr, i);
+        set_keypair_addr(info.pk_addr, i);
+        wots_gen_leafx1(nodes[0][i], ctx, i, &info);
+        /* Also store in cache->leaves */
+        memcpy(cache->leaves[i], nodes[0][i], SPX_N);
     }
 
-    for (i = 0; i < SPX_TREE_LEAVES; i += 2) {
-        memcpy(cache->leaves[i + 1], cache->auth_paths[i], SPX_N);
-        memcpy(cache->leaves[i], cache->auth_paths[i + 1], SPX_N);
+    /* Step 2: Build internal nodes bottom-up - O(n) */
+    for (h = 0; h < SPX_TREE_HEIGHT; h++) {
+        uint32_t nodes_at_level = SPX_TREE_LEAVES >> h;
+        uint32_t nodes_at_next = nodes_at_level >> 1;
+
+        for (i = 0; i < nodes_at_next; i++) {
+            unsigned char parent_input[2 * SPX_N];
+
+            set_tree_height(tree_addr, h + 1);
+            set_tree_index(tree_addr, i);
+
+            memcpy(parent_input, nodes[h][2*i], SPX_N);
+            memcpy(parent_input + SPX_N, nodes[h][2*i + 1], SPX_N);
+
+            thash(nodes[h + 1][i], parent_input, 2, ctx, tree_addr);
+        }
+    }
+
+    /* Step 3: Extract auth paths for each leaf - O(n * h) */
+    for (i = 0; i < SPX_TREE_LEAVES; i++) {
+        unsigned char *auth_path = cache->auth_paths[i];
+        uint32_t idx = i;
+
+        for (h = 0; h < SPX_TREE_HEIGHT; h++) {
+            uint32_t sibling_idx = idx ^ 1;
+            memcpy(auth_path + h * SPX_N, nodes[h][sibling_idx], SPX_N);
+            idx >>= 1;
+        }
     }
 
     cache->initialized = 1;
