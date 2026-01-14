@@ -467,3 +467,129 @@ int crypto_sign_signature_cached(uint8_t *sig, size_t *siglen,
 
     return 0;
 }
+
+/*============================================================================
+ * Method 1: Preemptive Signing API (Layer-Level Preemption)
+ *============================================================================*/
+
+int crypto_sign_preempt_init(spx_sign_ctx *sctx,
+                              uint8_t *sig,
+                              const uint8_t *m, size_t mlen,
+                              const uint8_t *sk) {
+    const uint8_t *sk_prf = sk + SPX_N;
+    const uint8_t *pk = sk + 2 * SPX_N;
+    uint8_t optrand[SPX_N];
+
+    /* Initialize context */
+    sctx->state = SPX_SIGN_STATE_INIT;
+    sctx->current_layer = 0;
+    sctx->sig_start = sig;
+    sctx->sig_ptr = sig;
+    sctx->siglen = 0;
+
+    /* Initialize crypto context */
+    memcpy(sctx->ctx.sk_seed, sk, SPX_N);
+    memcpy(sctx->ctx.pub_seed, pk, SPX_N);
+    initialize_hash_function(&sctx->ctx);
+
+    /* Initialize addresses */
+    memset(sctx->wots_addr, 0, sizeof(sctx->wots_addr));
+    memset(sctx->tree_addr, 0, sizeof(sctx->tree_addr));
+    set_type(sctx->wots_addr, SPX_ADDR_TYPE_WOTS);
+    set_type(sctx->tree_addr, SPX_ADDR_TYPE_HASHTREE);
+
+    /* Generate randomization value */
+    randombytes(optrand, SPX_N);
+    gen_message_random(sctx->sig_ptr, sk_prf, optrand, m, mlen, &sctx->ctx);
+
+    /* Derive message digest and leaf index */
+    hash_message(sctx->mhash, &sctx->tree, &sctx->idx_leaf,
+                 sctx->sig_ptr, pk, m, mlen, &sctx->ctx);
+    sctx->sig_ptr += SPX_N;
+
+    /* Set initial addresses for FORS */
+    set_tree_addr(sctx->wots_addr, sctx->tree);
+    set_keypair_addr(sctx->wots_addr, sctx->idx_leaf);
+
+    /* Sign the message hash using FORS */
+    fors_sign(sctx->sig_ptr, sctx->root, sctx->mhash, &sctx->ctx, sctx->wots_addr);
+    sctx->sig_ptr += SPX_FORS_BYTES;
+
+    /* FORS done, ready for Hypertree */
+    sctx->state = SPX_SIGN_STATE_FORS_DONE;
+    sctx->current_layer = 0;
+
+    return 0;
+}
+
+int crypto_sign_preempt_step(spx_sign_ctx *sctx) {
+    if (sctx->state == SPX_SIGN_STATE_COMPLETE) {
+        return SPX_SIGN_STATE_COMPLETE;
+    }
+
+    if (sctx->state == SPX_SIGN_STATE_INIT) {
+        /* Should have called init first */
+        return -1;
+    }
+
+    if (sctx->current_layer >= SPX_D) {
+        /* Already complete */
+        sctx->state = SPX_SIGN_STATE_COMPLETE;
+        sctx->siglen = SPX_BYTES;
+        free_hash_function(&sctx->ctx);
+        return SPX_SIGN_STATE_COMPLETE;
+    }
+
+    /* Execute one Hypertree layer */
+    int i = sctx->current_layer;
+
+    set_layer_addr(sctx->tree_addr, i);
+    set_tree_addr(sctx->tree_addr, sctx->tree);
+
+    copy_subtree_addr(sctx->wots_addr, sctx->tree_addr);
+    set_keypair_addr(sctx->wots_addr, sctx->idx_leaf);
+
+    merkle_sign(sctx->sig_ptr, sctx->root, &sctx->ctx,
+                sctx->wots_addr, sctx->tree_addr, sctx->idx_leaf);
+    sctx->sig_ptr += SPX_WOTS_BYTES + SPX_TREE_HEIGHT * SPX_N;
+
+    /* Update indices for next layer */
+    sctx->idx_leaf = (sctx->tree & ((1 << SPX_TREE_HEIGHT) - 1));
+    sctx->tree = sctx->tree >> SPX_TREE_HEIGHT;
+
+    sctx->current_layer++;
+
+    if (sctx->current_layer >= SPX_D) {
+        /* Signing complete */
+        sctx->state = SPX_SIGN_STATE_COMPLETE;
+        sctx->siglen = SPX_BYTES;
+        free_hash_function(&sctx->ctx);
+        return SPX_SIGN_STATE_COMPLETE;
+    }
+
+    sctx->state = SPX_SIGN_STATE_LAYER_DONE;
+    return SPX_SIGN_STATE_LAYER_DONE;
+}
+
+int crypto_sign_preempt_is_complete(const spx_sign_ctx *sctx) {
+    return sctx->state == SPX_SIGN_STATE_COMPLETE;
+}
+
+size_t crypto_sign_preempt_siglen(const spx_sign_ctx *sctx) {
+    return sctx->siglen;
+}
+
+int crypto_sign_preempt_remaining_layers(const spx_sign_ctx *sctx) {
+    if (sctx->state == SPX_SIGN_STATE_COMPLETE) {
+        return 0;
+    }
+    return SPX_D - sctx->current_layer;
+}
+
+void crypto_sign_preempt_cleanup(spx_sign_ctx *sctx) {
+    /* Securely clear sensitive data */
+    memset(sctx->ctx.sk_seed, 0, SPX_N);
+    memset(sctx->root, 0, SPX_N);
+    memset(sctx->mhash, 0, SPX_FORS_MSG_BYTES);
+    sctx->state = SPX_SIGN_STATE_INIT;
+}

@@ -96,4 +96,124 @@ void merkle_sign_cached(uint8_t *sig, unsigned char *root,
                         uint32_t idx_leaf,
                         const spx_top_cache *cache);
 
+/*============================================================================
+ * Method 1: Preemptive Signing API (Layer-Level Preemption)
+ *
+ * Enables preemption between Hypertree layers to reduce Head-of-Line blocking.
+ * For 256f: 17 layers, each ~29ms → max blocking reduced from 500ms to 29ms
+ *============================================================================*/
+
+typedef enum {
+    SPX_SIGN_STATE_INIT = 0,       /* Initial state, ready to start */
+    SPX_SIGN_STATE_FORS_DONE,      /* FORS completed, ready for Hypertree */
+    SPX_SIGN_STATE_LAYER_DONE,     /* A layer completed, can preempt here */
+    SPX_SIGN_STATE_COMPLETE        /* Signing completed */
+} spx_sign_state;
+
+/*
+ * Context for preemptive signing.
+ * Size: ~300 bytes (extremely low overhead)
+ *
+ * This context preserves all state needed to pause and resume signing
+ * between Hypertree layers.
+ */
+typedef struct {
+    /* State tracking */
+    spx_sign_state state;
+    int current_layer;             /* Current layer (0 to SPX_D-1) */
+
+    /* Inter-layer values */
+    uint64_t tree;                 /* Current tree index */
+    uint32_t idx_leaf;             /* Leaf node index */
+    uint8_t *sig_ptr;              /* Current position in signature buffer */
+
+    /* Intermediate computation results */
+    uint8_t root[SPX_N];           /* Intermediate root value */
+    uint8_t mhash[SPX_FORS_MSG_BYTES]; /* Message hash (unchanged after FORS) */
+
+    /* Crypto Context */
+    spx_ctx ctx;                   /* pub_seed, sk_seed */
+    uint32_t wots_addr[8];         /* WOTS address */
+    uint32_t tree_addr[8];         /* Tree address */
+
+    /* Metadata */
+    uint8_t *sig_start;            /* Signature buffer start position */
+    size_t siglen;                 /* Final signature length */
+} spx_sign_ctx;
+
+/**
+ * Initialize a preemptive signing context.
+ *
+ * This performs:
+ * - Context initialization
+ * - Random value generation
+ * - Message hashing
+ * - FORS signing (~20% of total time)
+ *
+ * After this call, the context is ready for layer-by-layer Hypertree signing.
+ *
+ * @param sctx     Signing context (must be pre-allocated)
+ * @param sig      Signature output buffer
+ * @param m        Message to sign
+ * @param mlen     Message length
+ * @param sk       Secret key
+ * @return         0 on success, -1 on failure
+ */
+#define crypto_sign_preempt_init SPX_NAMESPACE(crypto_sign_preempt_init)
+int crypto_sign_preempt_init(spx_sign_ctx *sctx,
+                              uint8_t *sig,
+                              const uint8_t *m, size_t mlen,
+                              const uint8_t *sk);
+
+/**
+ * Execute one signing step (one Hypertree layer).
+ *
+ * Each call processes exactly one layer of the Hypertree.
+ * Between calls, the context can be saved and higher-priority
+ * operations can be executed.
+ *
+ * @param sctx     Signing context
+ * @return         SPX_SIGN_STATE_LAYER_DONE: can continue or preempt
+ *                 SPX_SIGN_STATE_COMPLETE: signing finished
+ *                 -1: error
+ */
+#define crypto_sign_preempt_step SPX_NAMESPACE(crypto_sign_preempt_step)
+int crypto_sign_preempt_step(spx_sign_ctx *sctx);
+
+/**
+ * Check if signing is complete.
+ *
+ * @param sctx     Signing context
+ * @return         1 if complete, 0 otherwise
+ */
+#define crypto_sign_preempt_is_complete SPX_NAMESPACE(crypto_sign_preempt_is_complete)
+int crypto_sign_preempt_is_complete(const spx_sign_ctx *sctx);
+
+/**
+ * Get signature length (call after completion).
+ *
+ * @param sctx     Signing context
+ * @return         Signature length in bytes
+ */
+#define crypto_sign_preempt_siglen SPX_NAMESPACE(crypto_sign_preempt_siglen)
+size_t crypto_sign_preempt_siglen(const spx_sign_ctx *sctx);
+
+/**
+ * Get the number of remaining layers.
+ *
+ * @param sctx     Signing context
+ * @return         Number of layers remaining (0 when complete)
+ */
+#define crypto_sign_preempt_remaining_layers SPX_NAMESPACE(crypto_sign_preempt_remaining_layers)
+int crypto_sign_preempt_remaining_layers(const spx_sign_ctx *sctx);
+
+/**
+ * Cleanup signing context.
+ * Securely clears sensitive data from the context.
+ *
+ * @param sctx     Signing context
+ */
+#define crypto_sign_preempt_cleanup SPX_NAMESPACE(crypto_sign_preempt_cleanup)
+void crypto_sign_preempt_cleanup(spx_sign_ctx *sctx);
+
 #endif /* MERKLE_H_ */
