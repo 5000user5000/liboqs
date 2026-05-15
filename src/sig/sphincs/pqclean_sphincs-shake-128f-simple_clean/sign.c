@@ -303,7 +303,11 @@ int crypto_sign_init_multilayer_cache(spx_multilayer_cache *cache,
 
     free_hash_function(&ctx);
 
-    return 0;
+    return cache->initialized ? 0 : -1;
+}
+
+void crypto_sign_free_multilayer_cache(spx_multilayer_cache *cache) {
+    merkle_free_multilayer_cache(cache);
 }
 
 int crypto_sign_signature_multilayer_cached(uint8_t *sig, size_t *siglen,
@@ -365,13 +369,10 @@ int crypto_sign_signature_multilayer_cached(uint8_t *sig, size_t *siglen,
         set_keypair_addr(wots_addr, idx_leaf);
 
         if (cache && cache->initialized &&
-            (i == SPX_D - 1 || (i == SPX_D - 2 && cache->num_layers >= 2))) {
-            uint64_t cache_tree_idx = 0;
-            if (i == SPX_D - 2) {
-                cache_tree_idx = tree_indices[SPX_D - 1] & ((1 << SPX_TREE_HEIGHT) - 1);
-            }
+            (SPX_D - 1 - (int)i) >= 0 &&
+            (SPX_D - 1 - (int)i) < cache->num_layers) {
             merkle_sign_multilayer_cached(sig, root, &ctx, wots_addr, tree_addr,
-                                           idx_leaf, cache_tree_idx, i, cache);
+                                           idx_leaf, tree, i, cache);
         } else {
             merkle_sign(sig, root, &ctx, wots_addr, tree_addr, idx_leaf);
         }

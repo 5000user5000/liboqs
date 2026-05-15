@@ -33,8 +33,8 @@ void merkle_gen_root(unsigned char *root, const spx_ctx *ctx);
 /* Number of leaves in each XMSS tree */
 #define SPX_TREE_LEAVES (1 << SPX_TREE_HEIGHT)  /* 2^3 = 8 for 128f */
 
-/* Maximum cacheable layers */
-#define SPX_CACHE_MAX_LAYERS 2
+/* Maximum root-down cacheable layers under the 1 GiB study cap. */
+#define SPX_CACHE_MAX_LAYERS 7
 
 /*
  * Single layer cache: stores auth paths for one tree
@@ -44,26 +44,23 @@ typedef struct {
     unsigned char auth_paths[SPX_TREE_LEAVES][SPX_TREE_HEIGHT * SPX_N];
 } spx_layer_tree_cache;
 
+typedef struct {
+    uint64_t tree_count;
+    spx_layer_tree_cache *trees;
+} spx_cache_layer_set;
+
 /*
- * Multi-layer cache structure for SPHINCS+-128f
+ * Dynamic root-down cache structure for SPHINCS+-128f.
  *
- * For 2 layers cached:
- *   - Layer 21 (top): 1 tree → 384 B
- *   - Layer 20: 8 trees → 3 KB
- *   - Total: ~3.4 KB for 2 layers
- *
- * Expected speedup: 2 layers / 22 total ≈ 9.1%
+ * cached layer set 0: layer 21 (top), 1 tree
+ * cached layer set 1: layer 20, 8 trees
+ * ...
+ * cached layer set 6: layer 15, 8^6 trees
  */
 typedef struct {
     int num_layers;
     int initialized;
-
-    /* Layer 21 (top layer, index SPX_D-1): 1 tree */
-    spx_layer_tree_cache top_layer;
-
-    /* Layer 20 (second layer, index SPX_D-2): 8 trees */
-    spx_layer_tree_cache second_layer[SPX_TREE_LEAVES];
-
+    spx_cache_layer_set layer_sets[SPX_CACHE_MAX_LAYERS];
 } spx_multilayer_cache;
 
 /* Backward compatibility */
@@ -73,11 +70,14 @@ typedef struct {
     unsigned char auth_paths[SPX_TREE_LEAVES][SPX_TREE_HEIGHT * SPX_N];
 } spx_top_cache;
 
-/* Initialize multi-layer cache (1 or 2 layers) */
+/* Initialize multi-layer cache (1 to SPX_CACHE_MAX_LAYERS root-down layers) */
 #define merkle_init_multilayer_cache SPX_NAMESPACE(merkle_init_multilayer_cache)
 void merkle_init_multilayer_cache(spx_multilayer_cache *cache,
                                    const spx_ctx *ctx,
                                    int num_layers);
+
+#define merkle_free_multilayer_cache SPX_NAMESPACE(merkle_free_multilayer_cache)
+void merkle_free_multilayer_cache(spx_multilayer_cache *cache);
 
 /* Initialize the top layer cache (backward compatible) */
 #define merkle_init_top_cache SPX_NAMESPACE(merkle_init_top_cache)

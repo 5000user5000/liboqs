@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "address.h"
@@ -137,31 +138,58 @@ static void compute_tree_auth_paths(spx_layer_tree_cache *tree_cache,
 }
 
 /*
- * Initialize multi-layer cache.
- * For 128f: 2 layers supported (3.4 KB, ~9% speedup)
+ * Initialize root-down multi-layer cache.
  */
 void merkle_init_multilayer_cache(spx_multilayer_cache *cache,
                                    const spx_ctx *ctx,
                                    int num_layers) {
-    uint32_t i;
+    int root_depth;
 
     if (num_layers < 1) num_layers = 1;
     if (num_layers > SPX_CACHE_MAX_LAYERS) num_layers = SPX_CACHE_MAX_LAYERS;
 
+    memset(cache, 0, sizeof(*cache));
     cache->num_layers = num_layers;
     cache->initialized = 0;
 
-    /* Cache top layer */
-    compute_tree_auth_paths(&cache->top_layer, ctx, SPX_D - 1, 0);
+    for (root_depth = 0; root_depth < num_layers; root_depth++) {
+        uint64_t tree_count = 1ULL << (SPX_TREE_HEIGHT * root_depth);
+        int layer = SPX_D - 1 - root_depth;
+        uint64_t tree_idx;
 
-    /* Cache second layer if requested */
-    if (num_layers >= 2) {
-        for (i = 0; i < SPX_TREE_LEAVES; i++) {
-            compute_tree_auth_paths(&cache->second_layer[i], ctx, SPX_D - 2, i);
+        cache->layer_sets[root_depth].tree_count = tree_count;
+        cache->layer_sets[root_depth].trees =
+            (spx_layer_tree_cache *)calloc((size_t)tree_count, sizeof(spx_layer_tree_cache));
+
+        if (!cache->layer_sets[root_depth].trees) {
+            merkle_free_multilayer_cache(cache);
+            return;
+        }
+
+        for (tree_idx = 0; tree_idx < tree_count; tree_idx++) {
+            compute_tree_auth_paths(&cache->layer_sets[root_depth].trees[tree_idx],
+                                    ctx, layer, tree_idx);
         }
     }
 
     cache->initialized = 1;
+}
+
+void merkle_free_multilayer_cache(spx_multilayer_cache *cache) {
+    int i;
+
+    if (!cache) {
+        return;
+    }
+
+    for (i = 0; i < SPX_CACHE_MAX_LAYERS; i++) {
+        free(cache->layer_sets[i].trees);
+        cache->layer_sets[i].trees = NULL;
+        cache->layer_sets[i].tree_count = 0;
+    }
+
+    cache->num_layers = 0;
+    cache->initialized = 0;
 }
 
 /*
@@ -181,11 +209,12 @@ void merkle_sign_multilayer_cached(uint8_t *sig, unsigned char *root,
     uint32_t h;
     const spx_layer_tree_cache *tree_cache = NULL;
 
-    if (layer == SPX_D - 1) {
-        tree_cache = &cache->top_layer;
-    } else if (layer == SPX_D - 2 && cache->num_layers >= 2) {
-        if (tree_index < SPX_TREE_LEAVES) {
-            tree_cache = &cache->second_layer[tree_index];
+    if (cache && cache->initialized) {
+        int root_depth = SPX_D - 1 - layer;
+        if (root_depth >= 0 && root_depth < cache->num_layers &&
+            root_depth < SPX_CACHE_MAX_LAYERS &&
+            tree_index < cache->layer_sets[root_depth].tree_count) {
+            tree_cache = &cache->layer_sets[root_depth].trees[tree_index];
         }
     }
 

@@ -97,6 +97,9 @@ int crypto_sign_init_multilayer_cache(spx_multilayer_cache *cache,
                                        const uint8_t *sk,
                                        int num_layers);
 
+#define crypto_sign_free_multilayer_cache SPX_NAMESPACE(crypto_sign_free_multilayer_cache)
+void crypto_sign_free_multilayer_cache(spx_multilayer_cache *cache);
+
 #define crypto_sign_signature_multilayer_cached SPX_NAMESPACE(crypto_sign_signature_multilayer_cached)
 int crypto_sign_signature_multilayer_cached(uint8_t *sig, size_t *siglen,
                                              const uint8_t *m, size_t mlen,
