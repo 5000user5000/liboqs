@@ -310,14 +310,33 @@ void crypto_sign_free_multilayer_cache(spx_multilayer_cache *cache) {
     merkle_free_multilayer_cache(cache);
 }
 
-int crypto_sign_signature_multilayer_cached(uint8_t *sig, size_t *siglen,
-                                             const uint8_t *m, size_t mlen,
-                                             const uint8_t *sk,
-                                             const spx_multilayer_cache *cache) {
+int crypto_sign_init_entry_cache(spx_entry_cache *cache, size_t capacity,
+                                 spx_entry_cache_policy policy) {
+    return merkle_init_entry_cache(cache, capacity, policy);
+}
+
+void crypto_sign_free_entry_cache(spx_entry_cache *cache) {
+    merkle_free_entry_cache(cache);
+}
+
+static int crypto_sign_signature_cache_internal(
+        uint8_t *sig, size_t *siglen, const uint8_t *m, size_t mlen,
+        const uint8_t *sk, const spx_multilayer_cache *cache,
+        spx_entry_cache *entry_cache) {
     spx_ctx ctx;
 
     const uint8_t *sk_prf = sk + SPX_N;
     const uint8_t *pk = sk + 2 * SPX_N;
+
+    if (entry_cache) {
+        if (!entry_cache->key_bound) {
+            memcpy(entry_cache->key_id, pk, sizeof(entry_cache->key_id));
+            entry_cache->key_bound = 1;
+        } else if (memcmp(entry_cache->key_id, pk,
+                          sizeof(entry_cache->key_id)) != 0) {
+            return -1;
+        }
+    }
 
     uint8_t optrand[SPX_N];
     uint8_t mhash[SPX_FORS_MSG_BYTES];
@@ -368,7 +387,10 @@ int crypto_sign_signature_multilayer_cached(uint8_t *sig, size_t *siglen,
         copy_subtree_addr(wots_addr, tree_addr);
         set_keypair_addr(wots_addr, idx_leaf);
 
-        if (cache && cache->initialized &&
+        if (entry_cache && entry_cache->initialized) {
+            merkle_sign_entry_cached(sig, root, &ctx, wots_addr, tree_addr,
+                                     idx_leaf, tree, i, entry_cache);
+        } else if (cache && cache->initialized &&
             (SPX_D - 1 - (int)i) >= 0 &&
             (SPX_D - 1 - (int)i) < cache->num_layers) {
             merkle_sign_multilayer_cached(sig, root, &ctx, wots_addr, tree_addr,
@@ -387,6 +409,22 @@ int crypto_sign_signature_multilayer_cached(uint8_t *sig, size_t *siglen,
     *siglen = SPX_BYTES;
 
     return 0;
+}
+
+int crypto_sign_signature_multilayer_cached(uint8_t *sig, size_t *siglen,
+                                             const uint8_t *m, size_t mlen,
+                                             const uint8_t *sk,
+                                             const spx_multilayer_cache *cache) {
+    return crypto_sign_signature_cache_internal(sig, siglen, m, mlen, sk,
+                                                cache, NULL);
+}
+
+int crypto_sign_signature_entry_cached(uint8_t *sig, size_t *siglen,
+                                        const uint8_t *m, size_t mlen,
+                                        const uint8_t *sk,
+                                        spx_entry_cache *cache) {
+    return crypto_sign_signature_cache_internal(sig, siglen, m, mlen, sk,
+                                                NULL, cache);
 }
 
 int crypto_sign_init_cache(spx_top_cache *cache, const uint8_t *sk) {

@@ -63,6 +63,38 @@ typedef struct {
     spx_cache_layer_set layer_sets[SPX_CACHE_MAX_LAYERS];
 } spx_multilayer_cache;
 
+typedef enum {
+    SPX_ENTRY_CACHE_FIFO = 0,
+    SPX_ENTRY_CACHE_LRU = 1,
+    SPX_ENTRY_CACHE_STRUCTURE_AWARE = 2
+} spx_entry_cache_policy;
+
+typedef struct {
+    int valid;
+    int layer_from_top;
+    uint64_t tree_index;
+    uint64_t insertion_sequence;
+    uint64_t last_access_sequence;
+    spx_layer_tree_cache tree;
+} spx_entry_cache_item;
+
+typedef struct {
+    int initialized;
+    int key_bound;
+    uint8_t key_id[2 * SPX_N];
+    size_t capacity;
+    size_t size;
+    spx_entry_cache_policy policy;
+    uint64_t sequence;
+    uint64_t accesses;
+    uint64_t hits;
+    uint64_t misses;
+    uint64_t insertions;
+    uint64_t evictions;
+    uint64_t bypasses;
+    spx_entry_cache_item *entries;
+} spx_entry_cache;
+
 /* Backward compatibility */
 typedef struct {
     int initialized;
@@ -79,6 +111,13 @@ void merkle_init_multilayer_cache(spx_multilayer_cache *cache,
 #define merkle_free_multilayer_cache SPX_NAMESPACE(merkle_free_multilayer_cache)
 void merkle_free_multilayer_cache(spx_multilayer_cache *cache);
 
+#define merkle_init_entry_cache SPX_NAMESPACE(merkle_init_entry_cache)
+int merkle_init_entry_cache(spx_entry_cache *cache, size_t capacity,
+                            spx_entry_cache_policy policy);
+
+#define merkle_free_entry_cache SPX_NAMESPACE(merkle_free_entry_cache)
+void merkle_free_entry_cache(spx_entry_cache *cache);
+
 /* Initialize the top layer cache (backward compatible) */
 #define merkle_init_top_cache SPX_NAMESPACE(merkle_init_top_cache)
 void merkle_init_top_cache(spx_top_cache *cache, const spx_ctx *ctx);
@@ -91,6 +130,13 @@ void merkle_sign_multilayer_cached(uint8_t *sig, unsigned char *root,
                                     uint32_t idx_leaf, uint64_t tree_index,
                                     int layer,
                                     const spx_multilayer_cache *cache);
+
+#define merkle_sign_entry_cached SPX_NAMESPACE(merkle_sign_entry_cached)
+void merkle_sign_entry_cached(uint8_t *sig, unsigned char *root,
+                              const spx_ctx *ctx,
+                              uint32_t wots_addr[8], uint32_t tree_addr[8],
+                              uint32_t idx_leaf, uint64_t tree_index,
+                              int layer, spx_entry_cache *cache);
 
 /* Generate a Merkle signature using cached top layer data (backward compatible) */
 #define merkle_sign_cached SPX_NAMESPACE(merkle_sign_cached)

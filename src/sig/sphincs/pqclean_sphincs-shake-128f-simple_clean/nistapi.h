@@ -106,6 +106,19 @@ int crypto_sign_signature_multilayer_cached(uint8_t *sig, size_t *siglen,
                                              const uint8_t *sk,
                                              const spx_multilayer_cache *cache);
 
+
+#define crypto_sign_init_entry_cache SPX_NAMESPACE(crypto_sign_init_entry_cache)
+int crypto_sign_init_entry_cache(spx_entry_cache *cache, size_t capacity,
+                                 spx_entry_cache_policy policy);
+
+#define crypto_sign_free_entry_cache SPX_NAMESPACE(crypto_sign_free_entry_cache)
+void crypto_sign_free_entry_cache(spx_entry_cache *cache);
+
+#define crypto_sign_signature_entry_cached SPX_NAMESPACE(crypto_sign_signature_entry_cached)
+int crypto_sign_signature_entry_cached(uint8_t *sig, size_t *siglen,
+                                       const uint8_t *m, size_t mlen,
+                                       const uint8_t *sk,
+                                       spx_entry_cache *cache);
 #define crypto_sign_init_cache SPX_NAMESPACE(crypto_sign_init_cache)
 int crypto_sign_init_cache(spx_top_cache *cache, const uint8_t *sk);
 

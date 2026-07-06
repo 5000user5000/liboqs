@@ -192,6 +192,33 @@ void merkle_free_multilayer_cache(spx_multilayer_cache *cache) {
     cache->initialized = 0;
 }
 
+int merkle_init_entry_cache(spx_entry_cache *cache, size_t capacity,
+                            spx_entry_cache_policy policy) {
+    if (!cache || capacity == 0 ||
+        policy < SPX_ENTRY_CACHE_FIFO ||
+        policy > SPX_ENTRY_CACHE_STRUCTURE_AWARE) {
+        return -1;
+    }
+    memset(cache, 0, sizeof(*cache));
+    if (capacity > SIZE_MAX / sizeof(spx_entry_cache_item)) {
+        return -1;
+    }
+    cache->entries = calloc(capacity, sizeof(spx_entry_cache_item));
+    if (!cache->entries) {
+        return -1;
+    }
+    cache->capacity = capacity;
+    cache->policy = policy;
+    cache->initialized = 1;
+    return 0;
+}
+
+void merkle_free_entry_cache(spx_entry_cache *cache) {
+    if (!cache) return;
+    free(cache->entries);
+    memset(cache, 0, sizeof(*cache));
+}
+
 /*
  * Generate a Merkle signature using multi-layer cached data.
  */
@@ -263,6 +290,128 @@ void merkle_sign_multilayer_cached(uint8_t *sig, unsigned char *root,
     }
 
     memcpy(root, current, SPX_N);
+}
+
+static void merkle_sign_from_entry(uint8_t *sig, unsigned char *root,
+                                   const spx_ctx *ctx,
+                                   uint32_t wots_addr[8],
+                                   uint32_t tree_addr[8],
+                                   uint32_t idx_leaf,
+                                   const spx_layer_tree_cache *tree_cache) {
+    unsigned char *auth_path = sig + SPX_WOTS_BYTES;
+    struct leaf_info_x1 info = { 0 };
+    unsigned steps[SPX_WOTS_LEN];
+    unsigned char leaf[SPX_N];
+    unsigned char current[SPX_N];
+
+    info.wots_sig = sig;
+    chain_lengths(steps, root);
+    info.wots_steps = steps;
+    set_type(&tree_addr[0], SPX_ADDR_TYPE_HASHTREE);
+    set_type(&info.pk_addr[0], SPX_ADDR_TYPE_WOTSPK);
+    copy_subtree_addr(&info.leaf_addr[0], wots_addr);
+    copy_subtree_addr(&info.pk_addr[0], wots_addr);
+    info.wots_sign_leaf = idx_leaf;
+    set_keypair_addr(info.leaf_addr, idx_leaf);
+    set_keypair_addr(info.pk_addr, idx_leaf);
+    wots_gen_leafx1(leaf, ctx, idx_leaf, &info);
+    memcpy(auth_path, tree_cache->auth_paths[idx_leaf],
+           SPX_TREE_HEIGHT * SPX_N);
+    memcpy(current, leaf, SPX_N);
+
+    for (uint32_t h = 0; h < SPX_TREE_HEIGHT; h++) {
+        uint32_t idx_in_level = idx_leaf >> h;
+        unsigned char *sibling = auth_path + h * SPX_N;
+        unsigned char parent[2 * SPX_N];
+        set_tree_height(tree_addr, h + 1);
+        set_tree_index(tree_addr, idx_in_level >> 1);
+        if (idx_in_level & 1) {
+            memcpy(parent, sibling, SPX_N);
+            memcpy(parent + SPX_N, current, SPX_N);
+        } else {
+            memcpy(parent, current, SPX_N);
+            memcpy(parent + SPX_N, sibling, SPX_N);
+        }
+        thash(current, parent, 2, ctx, tree_addr);
+    }
+    memcpy(root, current, SPX_N);
+}
+
+static size_t entry_cache_victim(const spx_entry_cache *cache) {
+    size_t victim = 0;
+    for (size_t i = 1; i < cache->capacity; i++) {
+        const spx_entry_cache_item *candidate = &cache->entries[i];
+        const spx_entry_cache_item *current = &cache->entries[victim];
+        int replace = 0;
+        if (cache->policy == SPX_ENTRY_CACHE_FIFO) {
+            replace = candidate->insertion_sequence < current->insertion_sequence;
+        } else if (cache->policy == SPX_ENTRY_CACHE_LRU) {
+            replace = candidate->last_access_sequence < current->last_access_sequence;
+        } else {
+            replace = candidate->layer_from_top > current->layer_from_top ||
+                      (candidate->layer_from_top == current->layer_from_top &&
+                       candidate->last_access_sequence < current->last_access_sequence);
+        }
+        if (replace) victim = i;
+    }
+    return victim;
+}
+
+void merkle_sign_entry_cached(uint8_t *sig, unsigned char *root,
+                              const spx_ctx *ctx,
+                              uint32_t wots_addr[8], uint32_t tree_addr[8],
+                              uint32_t idx_leaf, uint64_t tree_index,
+                              int layer, spx_entry_cache *cache) {
+    if (!cache || !cache->initialized || !cache->entries) {
+        merkle_sign(sig, root, ctx, wots_addr, tree_addr, idx_leaf);
+        return;
+    }
+    int layer_from_top = SPX_D - 1 - layer;
+    cache->sequence++;
+    cache->accesses++;
+    for (size_t i = 0; i < cache->capacity; i++) {
+        spx_entry_cache_item *entry = &cache->entries[i];
+        if (entry->valid && entry->layer_from_top == layer_from_top &&
+            entry->tree_index == tree_index) {
+            cache->hits++;
+            entry->last_access_sequence = cache->sequence;
+            merkle_sign_from_entry(sig, root, ctx, wots_addr, tree_addr,
+                                   idx_leaf, &entry->tree);
+            return;
+        }
+    }
+
+    cache->misses++;
+    size_t slot = cache->capacity;
+    for (size_t i = 0; i < cache->capacity; i++) {
+        if (!cache->entries[i].valid) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == cache->capacity) {
+        slot = entry_cache_victim(cache);
+        if (cache->policy == SPX_ENTRY_CACHE_STRUCTURE_AWARE &&
+            layer_from_top > cache->entries[slot].layer_from_top) {
+            cache->bypasses++;
+            merkle_sign(sig, root, ctx, wots_addr, tree_addr, idx_leaf);
+            return;
+        }
+        cache->evictions++;
+    } else {
+        cache->size++;
+    }
+
+    spx_entry_cache_item *entry = &cache->entries[slot];
+    compute_tree_auth_paths(&entry->tree, ctx, layer, tree_index);
+    entry->valid = 1;
+    entry->layer_from_top = layer_from_top;
+    entry->tree_index = tree_index;
+    entry->insertion_sequence = cache->sequence;
+    entry->last_access_sequence = cache->sequence;
+    cache->insertions++;
+    merkle_sign_from_entry(sig, root, ctx, wots_addr, tree_addr,
+                           idx_leaf, &entry->tree);
 }
 
 /*
